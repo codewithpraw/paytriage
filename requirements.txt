@@ -1,0 +1,4 @@
+# Paytriage has no external dependencies.
+# agent.py uses only the Python standard library.
+# This file exists so `pip install -r requirements.txt` has something
+# to point at; it installs nothing and that's correct.

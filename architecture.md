@@ -21,8 +21,15 @@ be reasoned about, tested, and replaced independently.
 ## Module layout
 
 ```
-Payment  -->  PolicyEngine.decide()  -->  Decision  -->  RecoverySimulator.run()  -->  CaseResult
- (input)          (stage 1 + 2)          (verdict)         (stage 3)                  (audit record)
+                        ┌─ refused ──────────────────────────┐
+                        │                                    v
+Payment --> PolicyEngine.check_guardrails()          Decision --> RecoverySimulator.run() --> CaseResult
+ (input)      (stage 1: hard refusals)                (verdict)        (stage 3)              (audit record)
+                        │                                    ^
+                        └─ allowed ─> AIDecider.decide() ─────┘
+                                       (stage 2: judgment)
+                                       falls back to
+                                       PolicyEngine.decide()
 ```
 
 **`Payment`** — a normalised, validated record. Malformed input (missing
@@ -30,13 +37,44 @@ fields, non-numeric amounts, duplicate IDs) is rejected here, before it can
 reach the decision logic. Rejections are collected and reported, not silently
 dropped and not fatal to the whole run.
 
-**`PolicyEngine.decide()`** — the only place decisions get made. Given a
-payment, it returns a `Decision`: whether to pursue it, which strategy to
-use, and a plain-English reason. This method is deliberately the single
-decision surface in the codebase — nothing upstream or downstream of it
-makes judgment calls. That isolation is intentional: it's the seam where a
-rule-based policy can be swapped for an LLM call later without touching
-validation, simulation, or reporting.
+**`PolicyEngine.check_guardrails()`** — the hard refusals, enforced in code
+before any model sees the payment. Returns a refusal `Decision`, or `None`
+meaning "safe to hand to the judgment layer." Keeping these out of the prompt
+is the point: a guardrail that lives in a prompt is a request, while one that
+lives in a branch is a guarantee. The model is never given the opportunity to
+argue with a fraud signature.
+
+**Batching.** `AIDecider.decide_batch()` sends up to 12 payments per request,
+and the model returns an array of decisions keyed by `payment_id`. This is not
+a speed optimisation — it is what makes the project runnable at all on a free
+tier that meters *requests* rather than payments, with quotas as low as 20. One
+request per payment cannot fit a 36-payment run into that; three requests can.
+
+The per-payment safety properties survive batching. A payment the model omits,
+returns with an invalid strategy, or answers with a `payment_id` that was never
+sent is failed *individually* and filled in from the rule engine — one bad entry
+does not poison the other eleven. `decide_all()` also asserts that no payment
+escapes with a null verdict, whatever happened upstream.
+
+**`AIDecider.decide_batch()`** — the judgment layer. Sends the payments to a model and
+gets back a structured `Decision`. Its output is validated before use: an
+unknown strategy, malformed JSON, a refusal, or a transport failure all route
+to `PolicyEngine.decide()` instead, and the reason is recorded in
+`decision_layer.ai_failures`. It never raises for a single payment, so one bad
+response cannot take down a batch.
+
+**Providers** — `GeminiProvider` and `ClaudeProvider` handle transport only:
+given a system prompt and a payment brief, return text or raise
+`ProviderError`. All validation and fallback logic lives in `AIDecider`, so it
+is written once and applies identically no matter who answers. Gemini is the
+default because its Flash models are on a free API tier, which keeps the
+project runnable at zero cost; swapping providers is a flag, not a rewrite.
+
+**`PolicyEngine.decide()`** — the full deterministic policy (guardrails plus
+routing). It serves two roles: the fallback whenever the AI layer can't
+produce a usable answer, and the entire decision layer under `--no-ai`. Having
+a complete rule-based path that is always ready to take over is what makes
+depending on a model safe.
 
 **`RecoverySimulator.run()`** — takes a `Decision` and executes it: runs the
 attempt ladder the strategy specifies, checks a hard global cap, and records
@@ -55,10 +93,12 @@ scored.
 
 ## The decision rules, and why each one exists
 
-### Refusal rules (checked first)
+### Refusal rules (checked first, in code, before the model)
 
 These are the guardrails — cases where the answer is "don't pursue this,"
-full stop, before any strategy is even considered.
+full stop, before any strategy is even considered. They run in
+`check_guardrails()` ahead of the AI layer, so a payment matching one of them
+is never sent to the model at all.
 
 **Bank decline + fewer than 5 prior payments → refuse.**
 A bank decline paired with thin account history is the standard signature of
@@ -79,7 +119,13 @@ Recovery isn't free — it costs a notification, a support ticket, or a
 customer's patience. Below this floor, the expected value of the recovered
 payment doesn't clearly exceed the cost of pursuing it.
 
-### Routing rules (given the customer is worth pursuing)
+### Routing rules (the fallback path, and what the model is asked to weigh)
+
+These rules are what `PolicyEngine.decide()` applies when the AI layer isn't
+available, and they also describe the reasoning the model is prompted to
+perform. Documented together because they should stay in agreement — if the
+model's judgment and the fallback diverge sharply on a case, that's worth
+knowing about.
 
 **Network error → immediate retry, no notification.**
 This is a gateway-side fault. There's nothing the customer needs to do, so
@@ -152,27 +198,46 @@ anyone who clones the repo.
 
 ---
 
+## Failure handling in the AI layer
+
+Depending on a network call for every decision introduces failure modes a rule
+engine doesn't have. Each is handled explicitly rather than allowed to
+propagate:
+
+| Failure | Handling |
+|---|---|
+| Rate limit (429) or 5xx | Retried with exponential backoff + jitter, up to 4 times |
+| Rate limit still failing after retries | Fall back to rules, record the status |
+| Other 4xx, connection failure | Fall back to rules immediately (retrying won't help) |
+| Model refuses to answer | Fall back to rules, record `model_refused` |
+| Output isn't valid JSON | Fall back to rules, record `invalid_json` |
+| Output is JSON but not an object | Fall back to rules |
+| JSON wrapped in a ```` ```json ```` fence | Fence stripped, decision kept |
+| Strategy isn't one we defined | Fall back to rules, record the bad value |
+| `should_recover` missing or non-boolean | Fall back to rules |
+| Confidence outside high/medium/low | Coerced to `low`, decision kept |
+| `should_recover: true` with strategy `skip` | Treated as the skip it describes |
+| Blank reasoning | Placeholder inserted, decision kept |
+| No credentials / SDK missing | Detected once up front; whole run uses rules |
+
+The distinction matters: a malformed *field* in an otherwise sensible answer is
+repaired, while a malformed *decision* is rejected outright. Every fallback is
+counted in `decision_layer.ai_failures`, so a run that quietly degraded to
+rules is visible in the output rather than looking like a successful AI run.
+
 ## What's explicitly out of scope (v1)
 
 - No live Razorpay API calls. `RecoverySimulator` stands in for one.
-- No LLM in the decision loop. `PolicyEngine.decide()` is rule-based.
 - No real customer notifications. "Notify" is logged as an action, not sent.
 
-None of these are hidden — the generated report itself carries
-`outcomes_are_simulated: true` and the assumption values, so the limitation
-travels with the data, not just with this document.
+Neither is hidden — the generated report carries `outcomes_are_simulated: true`
+and the assumption values, so the limitation travels with the data, not just
+with this document.
 
 ## Extension path
 
-The two natural next steps don't require restructuring anything:
-
-1. **Real recovery attempts** — replace `RecoverySimulator.run()`'s
-   probability check with an actual Razorpay test-mode API call. The
-   `Decision` and `CaseResult` interfaces stay the same.
-2. **AI-driven decisions** — replace the rule branches inside
-   `PolicyEngine.decide()` with a call to an LLM, given the same `Payment`
-   input and required to return the same `Decision` shape. Nothing in
-   validation, simulation, or reporting needs to change.
-
-Both are isolated changes because the seams were drawn around exactly this
+The remaining stand-in is the simulator. Replacing `RecoverySimulator.run()`'s
+probability check with an actual Razorpay test-mode API call would make
+outcomes as real as the decisions already are — and it's an isolated change,
+because the `Decision` → `CaseResult` seam was drawn around exactly this
 boundary from the start.

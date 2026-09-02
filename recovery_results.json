@@ -2,11 +2,23 @@
   "metadata": {
     "project": "Paytriage",
     "track": "AI Revenue Recovery",
-    "generated_on": "2026-08-29",
+    "generated_on": "2026-09-02",
     "generated_by": "agent.py",
     "random_seed": 42,
     "outcomes_are_simulated": true,
-    "simulation_note": "Decision policy, escalation ladder, stopping rules and audit trail are real. Individual attempt outcomes are drawn from the assumed per-reason success rates in RECOVERY_ODDS, not from a live payment gateway.",
+    "simulation_note": "Decision layer, escalation ladder, stopping rules, guardrails and audit trail are real. Individual attempt outcomes are drawn from the assumed per-reason success rates in RECOVERY_ODDS, not from a live payment gateway.",
+    "decision_layer": {
+      "ai_enabled": true,
+      "provider": "gemini",
+      "model": "gemini-3.5-flash-lite",
+      "decided_by": {
+        "gemini": 36,
+        "guardrail": 10
+      },
+      "ai_failures": [],
+      "rate_limit_retries": 0,
+      "note": "Guardrail decisions are refusals enforced in code before the model is consulted. Cases marked fallback_rules fell back to the deterministic engine because the AI call failed; see ai_failures."
+    },
     "policy": {
       "max_attempts_per_payment": 3,
       "min_prior_payments_for_recovery": 3,
@@ -31,24 +43,24 @@
     "amount_at_risk": 63204,
     "recovery_attempted": 36,
     "recovery_declined": 10,
-    "recovered_count": 30,
-    "recovered_amount": 33070,
-    "unrecovered_amount": 30134,
-    "recovery_rate_percent": 65.2,
-    "attempt_success_rate_percent": 83.3,
-    "amount_recovery_rate_percent": 52.3,
-    "total_customer_touches": 53,
-    "avg_touches_per_pursued_payment": 1.47
+    "recovered_count": 31,
+    "recovered_amount": 36569,
+    "unrecovered_amount": 26635,
+    "recovery_rate_percent": 67.4,
+    "attempt_success_rate_percent": 86.1,
+    "amount_recovery_rate_percent": 57.9,
+    "total_customer_touches": 55,
+    "avg_touches_per_pursued_payment": 1.53
   },
   "by_failure_reason": {
     "bank_decline": {
       "count": 7,
       "amount": 16143,
       "attempted": 2,
-      "recovered": 0,
-      "recovered_amount": 0,
-      "recovery_rate_percent": 0.0,
-      "attempt_success_rate_percent": 0.0
+      "recovered": 1,
+      "recovered_amount": 1999,
+      "recovery_rate_percent": 14.3,
+      "attempt_success_rate_percent": 50.0
     },
     "card_expired": {
       "count": 15,
@@ -64,7 +76,7 @@
       "amount": 23184,
       "attempted": 14,
       "recovered": 11,
-      "recovered_amount": 16689,
+      "recovered_amount": 18189,
       "recovery_rate_percent": 68.8,
       "attempt_success_rate_percent": 78.6
     },
@@ -83,17 +95,17 @@
       "count": 10,
       "amount": 12890,
       "attempted": 9,
-      "recovered": 7,
-      "recovered_amount": 5493,
-      "recovery_rate_percent": 70.0,
-      "attempt_success_rate_percent": 77.8
+      "recovered": 8,
+      "recovered_amount": 7492,
+      "recovery_rate_percent": 80.0,
+      "attempt_success_rate_percent": 88.9
     },
     "loyal": {
       "count": 29,
       "amount": 43171,
       "attempted": 27,
       "recovered": 23,
-      "recovered_amount": 27577,
+      "recovered_amount": 29077,
       "recovery_rate_percent": 79.3,
       "attempt_success_rate_percent": 85.2
     },
@@ -108,32 +120,23 @@
     }
   },
   "by_strategy": {
-    "customer_contact": {
-      "count": 2,
-      "amount": 3398,
-      "attempted": 2,
-      "recovered": 0,
-      "recovered_amount": 0,
-      "recovery_rate_percent": 0.0,
-      "attempt_success_rate_percent": 0.0
-    },
     "immediate_retry": {
-      "count": 15,
-      "amount": 14085,
-      "attempted": 15,
-      "recovered": 14,
-      "recovered_amount": 11586,
-      "recovery_rate_percent": 93.3,
-      "attempt_success_rate_percent": 93.3
+      "count": 13,
+      "amount": 10787,
+      "attempted": 13,
+      "recovered": 13,
+      "recovered_amount": 10787,
+      "recovery_rate_percent": 100.0,
+      "attempt_success_rate_percent": 100.0
     },
     "notify_then_retry": {
-      "count": 19,
-      "amount": 27081,
-      "attempted": 19,
-      "recovered": 16,
-      "recovered_amount": 21484,
-      "recovery_rate_percent": 84.2,
-      "attempt_success_rate_percent": 84.2
+      "count": 23,
+      "amount": 33777,
+      "attempted": 23,
+      "recovered": 18,
+      "recovered_amount": 25782,
+      "recovery_rate_percent": 78.3,
+      "attempt_success_rate_percent": 78.3
     },
     "skip": {
       "count": 10,
@@ -156,14 +159,15 @@
       "previous_successful_payments": 12,
       "customer_lifetime_value": 8988,
       "decision": "recover",
-      "strategy": "notify_then_retry",
-      "reasoning": "Card expired and the customer has to enter new details. Notify first, then retry. Retrying without telling them just burns attempts.",
-      "confidence": "medium",
+      "strategy": "immediate_retry",
+      "reasoning": "Loyal customer with a long tenure and expired card; account updater or silent card network refresh may resolve this.",
+      "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
           "day_offset": 0,
-          "action": "notification sent, then charge retried",
+          "action": "charge retried",
           "outcome": "success"
         }
       ],
@@ -181,8 +185,9 @@
       "customer_lifetime_value": 44982,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a loyal customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
+      "reasoning": "High-LTV loyal customer failed due to insufficient funds; notifying them allows time to top up before retrying.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -205,8 +210,9 @@
       "customer_lifetime_value": 5385,
       "decision": "recover",
       "strategy": "immediate_retry",
-      "reasoning": "Network error is a gateway-side fault, not a customer-side one. Nothing for the customer to fix and no reason to notify them. Retry immediately.",
+      "reasoning": "Transient network error on a loyal customer's account with strong history; immediate retry should clear it.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -229,8 +235,9 @@
       "customer_lifetime_value": 15993,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a at_risk customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
-      "confidence": "low",
+      "reasoning": "At-risk customer with insufficient funds needs notification to add funds for a successful retry.",
+      "confidence": "medium",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -253,8 +260,9 @@
       "customer_lifetime_value": 14970,
       "decision": "recover",
       "strategy": "immediate_retry",
-      "reasoning": "Card expired for a long-tenured customer (20 payments). Try the account updater path first; if it clears, the customer never has to be contacted at all.",
+      "reasoning": "High-value quarterly loyal customer with an expired card; account updater service is likely to refresh the card details.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -279,6 +287,7 @@
       "strategy": "skip",
       "reasoning": "Bank decline with only 3 prior payments. Thin history plus an issuer block is the common fraud signature; retrying risks chargebacks and issuer penalties. Refer to onboarding review instead.",
       "confidence": "high",
+      "decided_by": "guardrail",
       "attempts": [],
       "outcome": "not_attempted",
       "recovered_amount": 0,
@@ -296,6 +305,7 @@
       "strategy": "skip",
       "reasoning": "Only 1 prior successful payment(s), below the threshold of 3. Too little signal that this customer intends to keep paying. This is a retention problem, not a recovery one.",
       "confidence": "high",
+      "decided_by": "guardrail",
       "attempts": [],
       "outcome": "not_attempted",
       "recovered_amount": 0,
@@ -311,8 +321,9 @@
       "customer_lifetime_value": 59976,
       "decision": "recover",
       "strategy": "immediate_retry",
-      "reasoning": "Card expired for a long-tenured customer (24 payments). Try the account updater path first; if it clears, the customer never has to be contacted at all.",
+      "reasoning": "Extremely loyal and high-LTV customer with an expired card; account updater will likely resolve the card details automatically.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -335,8 +346,9 @@
       "customer_lifetime_value": 2495,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a at_risk customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
-      "confidence": "low",
+      "reasoning": "At-risk customer with low LTV and insufficient funds; notify them to give a chance to fund the account.",
+      "confidence": "medium",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -365,8 +377,9 @@
       "customer_lifetime_value": 20986,
       "decision": "recover",
       "strategy": "immediate_retry",
-      "reasoning": "Network error is a gateway-side fault, not a customer-side one. Nothing for the customer to fix and no reason to notify them. Retry immediately.",
+      "reasoning": "Network error for a loyal customer with solid payment history; an immediate retry will bypass the temporary glitch.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -391,6 +404,7 @@
       "strategy": "skip",
       "reasoning": "Bank decline with only 0 prior payments. Thin history plus an issuer block is the common fraud signature; retrying risks chargebacks and issuer penalties. Refer to onboarding review instead.",
       "confidence": "high",
+      "decided_by": "guardrail",
       "attempts": [],
       "outcome": "not_attempted",
       "recovered_amount": 0,
@@ -406,8 +420,9 @@
       "customer_lifetime_value": 32989,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a loyal customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
+      "reasoning": "High-LTV loyal customer hit with insufficient funds; notifying them is necessary so they can clear the balance.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -430,8 +445,9 @@
       "customer_lifetime_value": 11184,
       "decision": "recover",
       "strategy": "immediate_retry",
-      "reasoning": "Card expired for a long-tenured customer (16 payments). Try the account updater path first; if it clears, the customer never has to be contacted at all.",
+      "reasoning": "Loyal customer with an expired card; network account updater should handle the refresh seamlessly.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -454,8 +470,9 @@
       "customer_lifetime_value": 8792,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a at_risk customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
-      "confidence": "low",
+      "reasoning": "At-risk customer with insufficient funds; notify them to prompt a manual top-up.",
+      "confidence": "medium",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -484,8 +501,9 @@
       "customer_lifetime_value": 7581,
       "decision": "recover",
       "strategy": "immediate_retry",
-      "reasoning": "Network error is a gateway-side fault, not a customer-side one. Nothing for the customer to fix and no reason to notify them. Retry immediately.",
+      "reasoning": "Transient network error for a loyal customer; an immediate retry is safe and effective.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -507,14 +525,15 @@
       "previous_successful_payments": 13,
       "customer_lifetime_value": 27986,
       "decision": "recover",
-      "strategy": "notify_then_retry",
-      "reasoning": "Card expired and the customer has to enter new details. Notify first, then retry. Retrying without telling them just burns attempts.",
-      "confidence": "medium",
+      "strategy": "immediate_retry",
+      "reasoning": "Loyal quarterly customer with 13 successful payments and high LTV; an expired card can often be silently refreshed by network updaters before immediate retry.",
+      "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
           "day_offset": 0,
-          "action": "notification sent, then charge retried",
+          "action": "charge retried",
           "outcome": "success"
         }
       ],
@@ -534,6 +553,7 @@
       "strategy": "skip",
       "reasoning": "Only 2 prior successful payment(s), below the threshold of 3. Too little signal that this customer intends to keep paying. This is a retention problem, not a recovery one.",
       "confidence": "high",
+      "decided_by": "guardrail",
       "attempts": [],
       "outcome": "not_attempted",
       "recovered_amount": 0,
@@ -551,6 +571,7 @@
       "strategy": "skip",
       "reasoning": "Bank decline with only 2 prior payments. Thin history plus an issuer block is the common fraud signature; retrying risks chargebacks and issuer penalties. Refer to onboarding review instead.",
       "confidence": "high",
+      "decided_by": "guardrail",
       "attempts": [],
       "outcome": "not_attempted",
       "recovered_amount": 0,
@@ -566,8 +587,9 @@
       "customer_lifetime_value": 1794,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Card expired and the customer has to enter new details. Notify first, then retry. Retrying without telling them just burns attempts.",
-      "confidence": "medium",
+      "reasoning": "At-risk monthly customer with low LTV and an expired card; requires customer action to update their payment method before retrying.",
+      "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -596,8 +618,9 @@
       "customer_lifetime_value": 54978,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a loyal customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
+      "reasoning": "Highly loyal customer with strong LTV and insufficient funds; notify them to allow time for account top-up before subsequent retries.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -632,8 +655,9 @@
       "customer_lifetime_value": 5990,
       "decision": "recover",
       "strategy": "immediate_retry",
-      "reasoning": "Network error is a gateway-side fault, not a customer-side one. Nothing for the customer to fix and no reason to notify them. Retry immediately.",
+      "reasoning": "Network error for a loyal customer with solid history; immediate retry is appropriate since no customer action is required for temporary gateway glitches.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -656,8 +680,9 @@
       "customer_lifetime_value": 3596,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Card expired and the customer has to enter new details. Notify first, then retry. Retrying without telling them just burns attempts.",
+      "reasoning": "At-risk customer with an expired card needs to be notified to update payment details, though lower LTV makes it a moderate priority.",
       "confidence": "medium",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -686,8 +711,9 @@
       "customer_lifetime_value": 8379,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a loyal customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
+      "reasoning": "Loyal customer experiencing an insufficient funds error; notify them so they can fund the account for automated retries.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -712,6 +738,7 @@
       "strategy": "skip",
       "reasoning": "Bank decline with only 1 prior payments. Thin history plus an issuer block is the common fraud signature; retrying risks chargebacks and issuer penalties. Refer to onboarding review instead.",
       "confidence": "high",
+      "decided_by": "guardrail",
       "attempts": [],
       "outcome": "not_attempted",
       "recovered_amount": 0,
@@ -726,19 +753,20 @@
       "previous_successful_payments": 17,
       "customer_lifetime_value": 8483,
       "decision": "recover",
-      "strategy": "immediate_retry",
-      "reasoning": "Card expired for a long-tenured customer (17 payments). Try the account updater path first; if it clears, the customer never has to be contacted at all.",
+      "strategy": "notify_then_retry",
+      "reasoning": "Loyal customer with an expired card; notifying them ensures they update their card details promptly to maintain their long-running subscription.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
           "day_offset": 0,
-          "action": "charge retried",
+          "action": "notification sent, then charge retried",
           "outcome": "failed"
         },
         {
           "attempt_number": 2,
-          "day_offset": 1,
+          "day_offset": 2,
           "action": "charge retried",
           "outcome": "success"
         }
@@ -757,8 +785,9 @@
       "customer_lifetime_value": 35988,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a loyal customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
+      "reasoning": "High-LTV loyal customer hit with insufficient funds; notify them gently to ensure successful recovery of a high-value subscription.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -781,8 +810,9 @@
       "customer_lifetime_value": 2093,
       "decision": "recover",
       "strategy": "immediate_retry",
-      "reasoning": "Network error is a gateway-side fault, not a customer-side one. Nothing for the customer to fix and no reason to notify them. Retry immediately.",
+      "reasoning": "Temporary network error for an at-risk customer; an immediate retry can capture the payment without unnecessary customer friction.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -804,25 +834,26 @@
       "previous_successful_payments": 19,
       "customer_lifetime_value": 47481,
       "decision": "recover",
-      "strategy": "immediate_retry",
-      "reasoning": "Card expired for a long-tenured customer (19 payments). Try the account updater path first; if it clears, the customer never has to be contacted at all.",
+      "strategy": "notify_then_retry",
+      "reasoning": "Loyal, high-LTV customer with an expired card; notify them promptly to secure payment details update and continuation.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
           "day_offset": 0,
-          "action": "charge retried",
+          "action": "notification sent, then charge retried",
           "outcome": "failed"
         },
         {
           "attempt_number": 2,
-          "day_offset": 1,
+          "day_offset": 2,
           "action": "charge retried",
           "outcome": "failed"
         },
         {
           "attempt_number": 3,
-          "day_offset": 3,
+          "day_offset": 5,
           "action": "charge retried",
           "outcome": "failed"
         }
@@ -841,8 +872,9 @@
       "customer_lifetime_value": 8386,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a loyal customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
+      "reasoning": "Loyal customer facing insufficient funds; notify them to top up their account so scheduled retries can succeed.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -876,20 +908,33 @@
       "previous_successful_payments": 9,
       "customer_lifetime_value": 12591,
       "decision": "recover",
-      "strategy": "customer_contact",
-      "reasoning": "Bank decline from an established customer (9 prior payments). A retry cannot clear an issuer block, so this needs a human to find out whether it is a fraud hold, a lapsed mandate, or a closed account.",
-      "confidence": "low",
+      "strategy": "notify_then_retry",
+      "reasoning": "At-risk customer with a generic bank decline; notify them to verify their payment method or use an alternative.",
+      "confidence": "medium",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
-          "day_offset": 1,
-          "action": "support ticket raised for manual investigation",
+          "day_offset": 0,
+          "action": "notification sent, then charge retried",
+          "outcome": "failed"
+        },
+        {
+          "attempt_number": 2,
+          "day_offset": 2,
+          "action": "charge retried",
+          "outcome": "failed"
+        },
+        {
+          "attempt_number": 3,
+          "day_offset": 5,
+          "action": "charge retried",
           "outcome": "failed"
         }
       ],
       "outcome": "unrecovered",
       "recovered_amount": 0,
-      "stopped_because": "exhausted_attempt_budget_after_1"
+      "stopped_because": "exhausted_attempt_budget_after_3"
     },
     {
       "payment_id": "pay_WXY0Q4R",
@@ -903,6 +948,7 @@
       "strategy": "skip",
       "reasoning": "Lifetime value of 1197 is below the 1500 floor. Expected recovery does not cover the cost of contacting the customer.",
       "confidence": "high",
+      "decided_by": "guardrail",
       "attempts": [],
       "outcome": "not_attempted",
       "recovered_amount": 0,
@@ -918,8 +964,9 @@
       "customer_lifetime_value": 29990,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a loyal customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
+      "reasoning": "Loyal quarterly customer with strong LTV experienced a temporary insufficient funds error; notify and retry to allow them time to top up.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -954,8 +1001,9 @@
       "customer_lifetime_value": 5489,
       "decision": "recover",
       "strategy": "immediate_retry",
-      "reasoning": "Network error is a gateway-side fault, not a customer-side one. Nothing for the customer to fix and no reason to notify them. Retry immediately.",
+      "reasoning": "Network error for a loyal customer with 11 prior successful payments; immediate retry will likely clear the transient glitch.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -980,6 +1028,7 @@
       "strategy": "skip",
       "reasoning": "Only 1 prior successful payment(s), below the threshold of 3. Too little signal that this customer intends to keep paying. This is a retention problem, not a recovery one.",
       "confidence": "high",
+      "decided_by": "guardrail",
       "attempts": [],
       "outcome": "not_attempted",
       "recovered_amount": 0,
@@ -995,8 +1044,34 @@
       "customer_lifetime_value": 7475,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a loyal customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
+      "reasoning": "Highly loyal monthly customer hit an insufficient funds error; notify and retry over the coming days as they have a strong history.",
       "confidence": "high",
+      "decided_by": "gemini",
+      "attempts": [
+        {
+          "attempt_number": 1,
+          "day_offset": 0,
+          "action": "notification sent, then charge retried",
+          "outcome": "success"
+        }
+      ],
+      "outcome": "recovered",
+      "recovered_amount": 299,
+      "stopped_because": "recovered_on_attempt_1"
+    },
+    {
+      "payment_id": "pay_LMN0A9B",
+      "customer_id": "cust_BCD678",
+      "amount": 1999,
+      "failure_reason": "bank_decline",
+      "customer_history": "loyal",
+      "previous_successful_payments": 15,
+      "customer_lifetime_value": 29985,
+      "decision": "recover",
+      "strategy": "notify_then_retry",
+      "reasoning": "Bank decline for a loyal high-value customer; customer action is needed to clear the bank-side block, so notify them before retrying.",
+      "confidence": "medium",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -1018,32 +1093,8 @@
         }
       ],
       "outcome": "recovered",
-      "recovered_amount": 299,
+      "recovered_amount": 1999,
       "stopped_because": "recovered_on_attempt_3"
-    },
-    {
-      "payment_id": "pay_LMN0A9B",
-      "customer_id": "cust_BCD678",
-      "amount": 1999,
-      "failure_reason": "bank_decline",
-      "customer_history": "loyal",
-      "previous_successful_payments": 15,
-      "customer_lifetime_value": 29985,
-      "decision": "recover",
-      "strategy": "customer_contact",
-      "reasoning": "Bank decline from an established customer (15 prior payments). A retry cannot clear an issuer block, so this needs a human to find out whether it is a fraud hold, a lapsed mandate, or a closed account.",
-      "confidence": "low",
-      "attempts": [
-        {
-          "attempt_number": 1,
-          "day_offset": 1,
-          "action": "support ticket raised for manual investigation",
-          "outcome": "failed"
-        }
-      ],
-      "outcome": "unrecovered",
-      "recovered_amount": 0,
-      "stopped_because": "exhausted_attempt_budget_after_1"
     },
     {
       "payment_id": "pay_OPQ2C0D",
@@ -1057,6 +1108,7 @@
       "strategy": "skip",
       "reasoning": "Only 2 prior successful payment(s), below the threshold of 3. Too little signal that this customer intends to keep paying. This is a retention problem, not a recovery one.",
       "confidence": "high",
+      "decided_by": "guardrail",
       "attempts": [],
       "outcome": "not_attempted",
       "recovered_amount": 0,
@@ -1072,8 +1124,9 @@
       "customer_lifetime_value": 17980,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a loyal customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
+      "reasoning": "Loyal customer with 20 successful payments had insufficient funds; notify them to fund the account and retry.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -1096,8 +1149,9 @@
       "customer_lifetime_value": 3192,
       "decision": "recover",
       "strategy": "immediate_retry",
-      "reasoning": "Network error is a gateway-side fault, not a customer-side one. Nothing for the customer to fix and no reason to notify them. Retry immediately.",
+      "reasoning": "Transient network error for an at-risk customer; an immediate retry should successfully process the payment without friction.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -1119,14 +1173,15 @@
       "previous_successful_payments": 16,
       "customer_lifetime_value": 39984,
       "decision": "recover",
-      "strategy": "immediate_retry",
-      "reasoning": "Card expired for a long-tenured customer (16 payments). Try the account updater path first; if it clears, the customer never has to be contacted at all.",
+      "strategy": "notify_then_retry",
+      "reasoning": "Expired card for a very loyal, high LTV customer; notify them to update their payment details.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
           "day_offset": 0,
-          "action": "charge retried",
+          "action": "notification sent, then charge retried",
           "outcome": "success"
         }
       ],
@@ -1144,73 +1199,9 @@
       "customer_lifetime_value": 6487,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a loyal customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
+      "reasoning": "Insufficient funds for a loyal monthly customer; notify them and retry over the following days.",
       "confidence": "high",
-      "attempts": [
-        {
-          "attempt_number": 1,
-          "day_offset": 0,
-          "action": "notification sent, then charge retried",
-          "outcome": "success"
-        }
-      ],
-      "outcome": "recovered",
-      "recovered_amount": 499,
-      "stopped_because": "recovered_on_attempt_1"
-    },
-    {
-      "payment_id": "pay_DEF2M5N",
-      "customer_id": "cust_TUV456",
-      "amount": 2999,
-      "failure_reason": "bank_decline",
-      "customer_history": "new",
-      "previous_successful_payments": 0,
-      "customer_lifetime_value": 0,
-      "decision": "skip",
-      "strategy": "skip",
-      "reasoning": "Bank decline with only 0 prior payments. Thin history plus an issuer block is the common fraud signature; retrying risks chargebacks and issuer penalties. Refer to onboarding review instead.",
-      "confidence": "high",
-      "attempts": [],
-      "outcome": "not_attempted",
-      "recovered_amount": 0,
-      "stopped_because": "policy_declined_recovery"
-    },
-    {
-      "payment_id": "pay_GHI4O6P",
-      "customer_id": "cust_WXY789",
-      "amount": 299,
-      "failure_reason": "card_expired",
-      "customer_history": "loyal",
-      "previous_successful_payments": 23,
-      "customer_lifetime_value": 6877,
-      "decision": "recover",
-      "strategy": "immediate_retry",
-      "reasoning": "Card expired for a long-tenured customer (23 payments). Try the account updater path first; if it clears, the customer never has to be contacted at all.",
-      "confidence": "high",
-      "attempts": [
-        {
-          "attempt_number": 1,
-          "day_offset": 0,
-          "action": "charge retried",
-          "outcome": "success"
-        }
-      ],
-      "outcome": "recovered",
-      "recovered_amount": 299,
-      "stopped_because": "recovered_on_attempt_1"
-    },
-    {
-      "payment_id": "pay_JKL6Q7R",
-      "customer_id": "cust_ZAB012",
-      "amount": 1999,
-      "failure_reason": "insufficient_funds",
-      "customer_history": "at_risk",
-      "previous_successful_payments": 6,
-      "customer_lifetime_value": 11994,
-      "decision": "recover",
-      "strategy": "notify_then_retry",
-      "reasoning": "Insufficient funds from a at_risk customer. Likely a timing problem rather than an intent problem, so notify and space the retries across a pay cycle instead of hammering the same empty account.",
-      "confidence": "low",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -1236,6 +1227,74 @@
       "stopped_because": "exhausted_attempt_budget_after_3"
     },
     {
+      "payment_id": "pay_DEF2M5N",
+      "customer_id": "cust_TUV456",
+      "amount": 2999,
+      "failure_reason": "bank_decline",
+      "customer_history": "new",
+      "previous_successful_payments": 0,
+      "customer_lifetime_value": 0,
+      "decision": "skip",
+      "strategy": "skip",
+      "reasoning": "Bank decline with only 0 prior payments. Thin history plus an issuer block is the common fraud signature; retrying risks chargebacks and issuer penalties. Refer to onboarding review instead.",
+      "confidence": "high",
+      "decided_by": "guardrail",
+      "attempts": [],
+      "outcome": "not_attempted",
+      "recovered_amount": 0,
+      "stopped_because": "policy_declined_recovery"
+    },
+    {
+      "payment_id": "pay_GHI4O6P",
+      "customer_id": "cust_WXY789",
+      "amount": 299,
+      "failure_reason": "card_expired",
+      "customer_history": "loyal",
+      "previous_successful_payments": 23,
+      "customer_lifetime_value": 6877,
+      "decision": "recover",
+      "strategy": "notify_then_retry",
+      "reasoning": "Expired card for a long-tenured loyal customer; notify them to update their card details.",
+      "confidence": "high",
+      "decided_by": "gemini",
+      "attempts": [
+        {
+          "attempt_number": 1,
+          "day_offset": 0,
+          "action": "notification sent, then charge retried",
+          "outcome": "success"
+        }
+      ],
+      "outcome": "recovered",
+      "recovered_amount": 299,
+      "stopped_because": "recovered_on_attempt_1"
+    },
+    {
+      "payment_id": "pay_JKL6Q7R",
+      "customer_id": "cust_ZAB012",
+      "amount": 1999,
+      "failure_reason": "insufficient_funds",
+      "customer_history": "at_risk",
+      "previous_successful_payments": 6,
+      "customer_lifetime_value": 11994,
+      "decision": "recover",
+      "strategy": "notify_then_retry",
+      "reasoning": "At-risk customer hit with an insufficient funds error; notify them to add funds, balancing recovery against churn risk.",
+      "confidence": "medium",
+      "decided_by": "gemini",
+      "attempts": [
+        {
+          "attempt_number": 1,
+          "day_offset": 0,
+          "action": "notification sent, then charge retried",
+          "outcome": "success"
+        }
+      ],
+      "outcome": "recovered",
+      "recovered_amount": 1999,
+      "stopped_because": "recovered_on_attempt_1"
+    },
+    {
       "payment_id": "pay_MNO8S8T",
       "customer_id": "cust_CDE345",
       "amount": 599,
@@ -1245,8 +1304,9 @@
       "customer_lifetime_value": 10782,
       "decision": "recover",
       "strategy": "immediate_retry",
-      "reasoning": "Network error is a gateway-side fault, not a customer-side one. Nothing for the customer to fix and no reason to notify them. Retry immediately.",
+      "reasoning": "Network error for a loyal customer with 18 successful payments; immediate retry will resolve the transient failure.",
       "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,
@@ -1269,8 +1329,9 @@
       "customer_lifetime_value": 10891,
       "decision": "recover",
       "strategy": "notify_then_retry",
-      "reasoning": "Card expired and the customer has to enter new details. Notify first, then retry. Retrying without telling them just burns attempts.",
-      "confidence": "medium",
+      "reasoning": "Expired card for a loyal quarterly customer; notify them to update their card information.",
+      "confidence": "high",
+      "decided_by": "gemini",
       "attempts": [
         {
           "attempt_number": 1,

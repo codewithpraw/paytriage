@@ -1,4 +1,11 @@
-# Paytriage has no external dependencies.
-# agent.py uses only the Python standard library.
-# This file exists so `pip install -r requirements.txt` has something
-# to point at; it installs nothing and that's correct.
+# Paytriage's decision layer calls a hosted model.
+#
+# Default provider is Google Gemini, whose Flash models run on a free API tier
+# (no credit card). Get a key at https://aistudio.google.com/apikey and set
+# GEMINI_API_KEY. Do NOT enable billing on that project - doing so removes the
+# free tier and every call bills from the first token.
+google-genai>=2.0.0
+
+# Optional: only needed for `--provider claude`, which requires purchased
+# credits (Anthropic has no free tier). Uncomment to use it.
+# anthropic>=1.0.0

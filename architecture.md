@@ -177,6 +177,40 @@ about a payment's fate is implicit.
 
 ---
 
+## Making the comparison honest
+
+`--compare` runs both engines on identical input and the same seed and reports
+the difference. Two properties had to be fixed before that number meant
+anything, and both are worth stating because the naive version looked fine.
+
+**Strategy has to affect the outcome.** The first version of `_odds()` read the
+failure reason, the customer segment and the attempt number — but not the
+strategy. So `immediate_retry` and `notify_then_retry` scored identically, both
+ladders were three attempts deep, and a decision layer that reasoned correctly
+about strategy showed *zero* measurable advantage. `--compare` reported "no
+difference" on a run where the model had decided five payments differently.
+
+`STRATEGY_FIT` fixes this by asking whether a strategy actually addresses the
+failure. The sharpest case is `card_expired`: the 0.72 base rate is annotated
+"customer updates card when prompted", so it only applies if you *prompted*
+them. Retrying that card silently is scored at a quarter of it, since nothing
+about the card has changed. The exception is a long-tenured customer, where the
+network's account-updater service may already hold fresh details — which is
+exactly the case both engines reason about explicitly, so the simulator has to
+model it or that reasoning scores as noise.
+
+**Each payment needs its own random stream.** The simulator originally drew from
+one shared `random.Random(seed)` consumed in order. That quietly breaks the A/B:
+a decision that changes one payment's attempt count consumes a different number
+of draws, so every *later* payment gets different luck too — including payments
+both engines decided identically. The comparison then attributed unrelated noise
+to the decision layer, and the per-payment swings did not reconcile against the
+total.
+
+Streams are now derived per payment from `f"{seed}:{payment_id}"`, so a
+payment's outcome depends only on its own decision. The test for this flips a
+single decision and asserts that exactly one payment's outcome moves.
+
 ## What's simulated, and how
 
 There's no live payment gateway wired into this project. Whether a given

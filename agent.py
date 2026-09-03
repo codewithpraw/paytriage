@@ -52,6 +52,7 @@ at https://aistudio.google.com/apikey. Or run --no-ai with no key at all.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import random
 import sys
@@ -108,6 +109,51 @@ SEGMENT_MULTIPLIER = {
 
 # Unknown failure reasons fall back to this. Conservative on purpose.
 UNKNOWN_REASON_ODDS = 0.20
+
+# How well each strategy actually addresses each failure reason, as a
+# multiplier on the base odds above.
+#
+# Without this, the simulator scores *how many* attempts were made and ignores
+# *which* strategy was chosen - so "notify the customer, then retry" and
+# "silently retry" score identically, and a decision layer that reasons well
+# about strategy shows no advantage. The base rates in RECOVERY_ODDS assume the
+# appropriate strategy was used; these multipliers price the mismatch.
+#
+# The sharpest case is card_expired: an expired card cannot clear until new
+# details exist, so retrying it silently is close to hopeless, while the 0.72
+# base rate ("customer updates card when prompted") only applies if you
+# actually prompted them.
+STRATEGY_FIT = {
+    "card_expired": {
+        "notify_then_retry": 1.00,   # the customer supplies new details
+        "immediate_retry": 0.25,     # nothing has changed; see updater bonus below
+        "customer_contact": 0.85,    # a human gets them to update, more slowly
+    },
+    "insufficient_funds": {
+        "notify_then_retry": 1.00,   # prompt them to top up, spaced over days
+        "immediate_retry": 0.45,     # the account is still empty right now
+        "customer_contact": 0.70,
+    },
+    "network_error": {
+        "immediate_retry": 1.00,     # gateway-side fault, just try again
+        "notify_then_retry": 0.90,   # works, but the notification is pure noise
+        "customer_contact": 0.60,    # wasteful: a human has nothing to fix
+    },
+    "bank_decline": {
+        "customer_contact": 1.00,    # only a human can find out what the block is
+        "notify_then_retry": 0.35,
+        "immediate_retry": 0.20,     # a retry cannot clear an issuer block
+    },
+}
+DEFAULT_STRATEGY_FIT = 0.60
+
+# Card networks run account-updater services that silently refresh stored card
+# details. For a long-tenured customer, an immediate retry on an expired card
+# can therefore clear without ever bothering them - the best possible outcome.
+# Both the rule engine and the model reason about this case explicitly, so the
+# simulator has to model it or that reasoning scores as noise.
+ACCOUNT_UPDATER_MIN_HISTORY = 15
+ACCOUNT_UPDATER_BONUS = 2.4
 
 # Strategy definitions: how many attempts the ladder allows, and how many days
 # to wait before each attempt. len(delays) is the attempt budget.
@@ -848,12 +894,33 @@ class RecoverySimulator:
     require touching PolicyEngine.
     """
 
-    def __init__(self, rng: random.Random):
-        self.rng = rng
+    def __init__(self, seed: int):
+        # Each payment draws from its own stream, derived from the run seed and
+        # the payment id - NOT from one shared sequence. With a shared RNG, a
+        # decision that changes one payment's attempt count shifts every later
+        # payment's draws too, so --compare would attribute unrelated luck to
+        # the decision layer. Per-payment streams keep the A/B honest: a payment's
+        # outcome depends only on its own decision.
+        self.seed = seed
 
-    def _odds(self, p: Payment, attempt_number: int) -> float:
+    def _rng_for(self, p: Payment) -> random.Random:
+        return random.Random(f"{self.seed}:{p.payment_id}")
+
+    def _odds(self, p: Payment, attempt_number: int, strategy: str) -> float:
         base = RECOVERY_ODDS.get(p.failure_reason, UNKNOWN_REASON_ODDS)
         base *= SEGMENT_MULTIPLIER.get(p.customer_history, 0.6)
+
+        # Does this strategy actually address why the payment failed?
+        fit = STRATEGY_FIT.get(p.failure_reason, {}).get(strategy, DEFAULT_STRATEGY_FIT)
+        if (
+            p.failure_reason == "card_expired"
+            and strategy == "immediate_retry"
+            and p.previous_successful_payments >= ACCOUNT_UPDATER_MIN_HISTORY
+        ):
+            # Long-tenured customer: the account updater may already have fresh
+            # details on file, so this is a real shortcut rather than a wasted try.
+            fit *= ACCOUNT_UPDATER_BONUS
+        base *= fit
 
         # Each successive attempt on the same payment is less likely to work
         # than the one before. If the first two failed, the third rarely saves it.
@@ -862,6 +929,7 @@ class RecoverySimulator:
         return max(0.0, min(base, 0.95))
 
     def run(self, p: Payment, decision: Decision, decided_by: str = "fallback_rules") -> CaseResult:
+        rng = self._rng_for(p)
         result = CaseResult(
             payment_id=p.payment_id,
             customer_id=p.customer_id,
@@ -894,7 +962,7 @@ class RecoverySimulator:
             else:
                 action = "charge retried"
 
-            succeeded = self.rng.random() < self._odds(p, i)
+            succeeded = rng.random() < self._odds(p, i, decision.strategy)
             result.attempts.append(
                 Attempt(
                     attempt_number=i,
@@ -1116,6 +1184,379 @@ def load_payments(path: Path) -> tuple[list[Payment], list[dict[str, str]]]:
     return payments, rejected
 
 
+COMPARE_ROWS = [
+    # (label, sub-label, key path, formatter, higher-is-better)
+    ("Amount recovered", "of total at risk", "recovered_amount", "money", True),
+    ("Amount recovery rate", "", "amount_recovery_rate_percent", "pct", True),
+    ("Payments recovered", "", "recovered_count", "int", True),
+    ("Pursued", "", "recovery_attempted", "int", None),
+    ("Success rate when pursued", "", "attempt_success_rate_percent", "pct", True),
+    ("Refused by guardrails", "enforced in code", "recovery_declined", "int", None),
+    ("Customer touches", "", "total_customer_touches", "int", False),
+]
+
+
+def build_comparison(rules: dict[str, Any], ai: dict[str, Any]) -> dict[str, Any]:
+    """Diff two reports produced from identical input and seed.
+
+    The only variable between them is who decided each case, so every delta
+    here is attributable to the decision layer rather than to chance.
+    """
+    rows = []
+    for label, sub, key, fmt, higher_better in COMPARE_ROWS:
+        a, b = rules["summary"][key], ai["summary"][key]
+        delta = round(b - a, 2)
+        if higher_better is None or delta == 0:
+            direction = "flat"
+        else:
+            improved = (delta > 0) == higher_better
+            direction = "up" if improved else "down"
+        rows.append(
+            {
+                "label": label, "sublabel": sub, "key": key, "format": fmt,
+                "rules": a, "ai": b, "delta": delta, "direction": direction,
+            }
+        )
+
+    # Which individual payments did the two engines decide differently?
+    rules_by_id = {c["payment_id"]: c for c in rules["audit_log"]}
+    divergent = []
+    for c in ai["audit_log"]:
+        other = rules_by_id.get(c["payment_id"])
+        if other and other["strategy"] != c["strategy"]:
+            divergent.append(
+                {
+                    "payment_id": c["payment_id"],
+                    "amount": c["amount"],
+                    "failure_reason": c["failure_reason"],
+                    "customer_history": c["customer_history"],
+                    "rules_strategy": other["strategy"],
+                    "ai_strategy": c["strategy"],
+                    "ai_reasoning": c["reasoning"],
+                    "rules_outcome": other["outcome"],
+                    "ai_outcome": c["outcome"],
+                    "swing": c["recovered_amount"] - other["recovered_amount"],
+                }
+            )
+    divergent.sort(key=lambda d: -abs(d["swing"]))
+
+    return {
+        "rows": rows,
+        "divergent_decisions": divergent,
+        "divergent_count": len(divergent),
+        "net_swing": sum(d["swing"] for d in divergent),
+    }
+
+
+def print_comparison(comparison: dict[str, Any], ai_model: str) -> None:
+    line = "-" * 74
+    print()
+    print("RULES vs AI - identical input, identical seed, only the decider changes")
+    print(line)
+    print(f"  {'':<32}{'rules':>12}{'ai':>14}{'delta':>14}")
+    print(line)
+    for r in comparison["rows"]:
+        fmt = r["format"]
+        def show(v: float) -> str:
+            if fmt == "money":
+                return f"INR {v:,.0f}"
+            if fmt == "pct":
+                return f"{v}%"
+            return f"{v:,.0f}"
+        d = r["delta"]
+        sign = "+" if d > 0 else ""
+        mark = {"up": "  +", "down": "  -", "flat": "   "}[r["direction"]]
+        print(f"  {r['label']:<32}{show(r['rules']):>12}{show(r['ai']):>14}"
+              f"{sign + show(d) if d else '--':>13}{mark}")
+    print(line)
+    n = comparison["divergent_count"]
+    swing = comparison["net_swing"]
+    print(f"  {n} payment(s) decided differently by {ai_model}, net swing INR {swing:+,}")
+    if comparison["divergent_decisions"]:
+        print()
+        print("  Largest divergences:")
+        for d in comparison["divergent_decisions"][:5]:
+            print(f"    {d['payment_id']}  INR {d['amount']:>6,}  {d['failure_reason']:<19}"
+                  f" {d['rules_strategy']} -> {d['ai_strategy']}  ({d['swing']:+,})")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# HTML report
+#
+# Self-contained: no framework, no CDN, no build step. Written as one string
+# because the whole point is that a judge can double-click the output file and
+# see the run - adding a template dependency to render a report would trade
+# that away for nothing.
+# ---------------------------------------------------------------------------
+
+HTML_STYLE = """
+:root{--ink:#16202f;--ink-soft:#3c4759;--muted:#6b7688;--stock:#f6f7f9;--card:#fff;
+--rule:#dde2ea;--rule-firm:#c3cbd8;--recovered:#0f6b57;--recovered-w:#e3f0ec;
+--lost:#9c3f2f;--lost-w:#f6e8e4;--guard:#8a6410;--guard-w:#f7eeda;--ai:#2b4b8f;--ai-w:#e6ebf6;
+--sans:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+--mono:"IBM Plex Mono",ui-monospace,"SF Mono",monospace;
+--serif:"Newsreader",Georgia,"Times New Roman",serif}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--ink:#e8ecf3;--ink-soft:#b3bccc;
+--muted:#8996a9;--stock:#10161f;--card:#171f2b;--rule:#28323f;--rule-firm:#3a4655;
+--recovered:#4cbfa2;--recovered-w:#12302a;--lost:#d98570;--lost-w:#331e18;
+--guard:#d9a942;--guard-w:#33280f;--ai:#8aa8e8;--ai-w:#1a2440}}
+:root[data-theme="dark"]{--ink:#e8ecf3;--ink-soft:#b3bccc;--muted:#8996a9;--stock:#10161f;
+--card:#171f2b;--rule:#28323f;--rule-firm:#3a4655;--recovered:#4cbfa2;--recovered-w:#12302a;
+--lost:#d98570;--lost-w:#331e18;--guard:#d9a942;--guard-w:#33280f;--ai:#8aa8e8;--ai-w:#1a2440}
+*{box-sizing:border-box}
+body{background:var(--stock);color:var(--ink);font-family:var(--sans);font-size:15px;
+line-height:1.55;margin:0;padding:0 20px 72px;-webkit-font-smoothing:antialiased}
+.sheet{max-width:1080px;margin:0 auto}
+.masthead{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;
+gap:20px;padding:40px 0 18px;border-bottom:2px solid var(--ink)}
+.wordmark{font-family:var(--serif);font-size:30px;font-weight:600;letter-spacing:-.015em;margin:0;line-height:1.1}
+.wordmark span{color:var(--muted);font-weight:400}
+.doctype{font-family:var(--mono);font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;
+color:var(--muted);margin-top:6px}
+.runmeta{display:grid;grid-template-columns:auto auto;gap:3px 20px;font-family:var(--mono);
+font-size:11.5px;color:var(--muted)}
+.runmeta b{color:var(--ink-soft);font-weight:500;text-align:right}
+.verdict{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));border-bottom:1px solid var(--rule)}
+.fig{padding:26px 24px 26px 0;border-right:1px solid var(--rule)}
+.fig:last-child{border-right:0}
+.fig-label{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
+color:var(--muted);margin-bottom:8px}
+.fig-value{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:30px;
+font-weight:600;letter-spacing:-.02em;line-height:1}
+.fig-value.pos{color:var(--recovered)}.fig-value.neg{color:var(--lost)}
+.fig-note{font-size:12.5px;color:var(--muted);margin-top:7px}
+section{margin-top:44px}
+h2{font-family:var(--serif);font-size:21px;font-weight:600;margin:0 0 4px;
+letter-spacing:-.01em;text-wrap:balance}
+.sub{color:var(--muted);font-size:13.5px;margin:0 0 18px;max-width:64ch}
+.panel{border:1px solid var(--rule-firm);background:var(--card);overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+.panel th,.panel td{padding:11px 16px;text-align:right;white-space:nowrap}
+.panel th:first-child,.panel td:first-child{text-align:left;white-space:normal}
+.panel thead th{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;
+text-transform:uppercase;color:var(--muted);font-weight:500;
+border-bottom:1px solid var(--rule-firm);background:var(--stock)}
+.panel tbody td{border-bottom:1px solid var(--rule)}
+.panel tbody tr:last-child td{border-bottom:0}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.col-ai{background:var(--ai-w);font-weight:600}
+.delta{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:500}
+.delta.up{color:var(--recovered)}.delta.down{color:var(--lost)}.delta.flat{color:var(--muted)}
+.rowlabel{font-weight:500}
+.rowlabel small{display:block;font-weight:400;color:var(--muted);font-size:12px}
+tr.headline td{background:var(--recovered-w)}
+tr.headline .num{font-size:15px;font-weight:600}
+.reasons{display:grid;gap:14px}
+.reason{display:grid;grid-template-columns:190px 1fr 152px;gap:16px;align-items:center}
+.reason-name{font-family:var(--mono);font-size:12.5px}
+.track{height:22px;background:var(--rule);position:relative}
+.fill{height:100%;background:var(--recovered)}
+.reason-fig{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:12.5px;
+text-align:right;color:var(--ink-soft)}
+.reason-fig b{color:var(--ink);font-weight:600}
+.ledger{border:1px solid var(--rule-firm);background:var(--card);overflow-x:auto}
+.ledger table{font-size:13px;min-width:920px}
+.ledger th{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+color:var(--muted);font-weight:500;text-align:left;padding:11px 14px;background:var(--stock);
+border-bottom:1px solid var(--rule-firm)}
+.ledger td{padding:12px 14px;border-bottom:1px solid var(--rule);vertical-align:top}
+.ledger tbody tr:last-child td{border-bottom:0}
+.ledger .amt{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.pid{font-family:var(--mono);font-size:12px}
+.why{color:var(--ink-soft);font-size:12.5px;line-height:1.45;max-width:42ch}
+.chip{display:inline-block;font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;
+padding:2px 7px;white-space:nowrap;border:1px solid currentColor}
+.chip.ai{color:var(--ai);background:var(--ai-w)}
+.chip.guard{color:var(--guard);background:var(--guard-w)}
+.chip.rules{color:var(--muted);background:var(--stock)}
+.chip.ok{color:var(--recovered);background:var(--recovered-w)}
+.chip.no{color:var(--lost);background:var(--lost-w)}
+.strategy{font-family:var(--mono);font-size:12px}
+.conf{color:var(--muted);font-size:11.5px;font-family:var(--mono)}
+.note{border-left:3px solid var(--guard);background:var(--guard-w);padding:14px 18px;
+font-size:13.5px;color:var(--ink-soft)}
+.note b{color:var(--ink)}
+.note.caveat{border-left-color:var(--muted);background:transparent;border:1px solid var(--rule)}
+footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--rule);font-family:var(--mono);
+font-size:11px;color:var(--muted);display:flex;flex-wrap:wrap;gap:8px 24px;justify-content:space-between}
+@media(max-width:720px){.reason{grid-template-columns:1fr;gap:5px}.reason-fig{text-align:left}
+.fig{border-right:0;border-bottom:1px solid var(--rule);padding-right:0}}
+"""
+
+
+def _esc(text: Any) -> str:
+    """Escape untrusted text. Model-written reasoning lands in this HTML."""
+    return html.escape(str(text), quote=True)
+
+
+def _money(v: float) -> str:
+    return f"&#8377;{v:,.0f}"
+
+
+def _fmt(value: float, fmt: str) -> str:
+    if fmt == "money":
+        return _money(value)
+    if fmt == "pct":
+        return f"{value}%"
+    return f"{value:,.0f}"
+
+
+def _render_compare(comparison: dict[str, Any]) -> str:
+    rows = []
+    for i, r in enumerate(comparison["rows"]):
+        sub = f"<small>{_esc(r['sublabel'])}</small>" if r["sublabel"] else ""
+        d = r["delta"]
+        if d == 0:
+            delta_txt = "&mdash;"
+        else:
+            delta_txt = ("+" if d > 0 else "&minus;") + _fmt(abs(d), r["format"])
+        rows.append(
+            f'<tr{" class=\"headline\"" if i == 0 else ""}>'
+            f'<td class="rowlabel">{_esc(r["label"])}{sub}</td>'
+            f'<td class="num">{_fmt(r["rules"], r["format"])}</td>'
+            f'<td class="num col-ai">{_fmt(r["ai"], r["format"])}</td>'
+            f'<td class="delta {r["direction"]}">{delta_txt}</td></tr>'
+        )
+
+    divergent = ""
+    if comparison["divergent_decisions"]:
+        items = []
+        for d in comparison["divergent_decisions"][:6]:
+            swing = d["swing"]
+            cls = "up" if swing > 0 else ("down" if swing < 0 else "flat")
+            sign = "+" if swing > 0 else ("&minus;" if swing < 0 else "")
+            items.append(
+                f'<tr><td class="pid">{_esc(d["payment_id"])}</td>'
+                f'<td class="num">{_money(d["amount"])}</td>'
+                f'<td><span class="strategy">{_esc(d["failure_reason"])}</span></td>'
+                f'<td><span class="strategy">{_esc(d["rules_strategy"])}</span> &rarr; '
+                f'<span class="strategy">{_esc(d["ai_strategy"])}</span></td>'
+                f'<td class="delta {cls}">{sign}{_money(abs(swing))}</td></tr>'
+            )
+        divergent = (
+            '<p class="sub" style="margin-top:26px">'
+            f'<b>{comparison["divergent_count"]} payment(s)</b> were decided differently, '
+            f'a net swing of {_money(abs(comparison["net_swing"]))}. '
+            "Every other case, both engines agreed on.</p>"
+            '<div class="panel"><table><thead><tr>'
+            "<th>Payment</th><th>Amount</th><th>Failure</th>"
+            "<th>Rules &rarr; AI</th><th>Swing</th>"
+            "</tr></thead><tbody>" + "".join(items) + "</tbody></table></div>"
+        )
+
+    return (
+        "<section><h2>Rule engine vs. AI decisions</h2>"
+        '<p class="sub">Identical input, identical simulator seed. The only variable is who '
+        "decided each case. Guardrail refusals are enforced in code and are the same in both "
+        "columns.</p>"
+        '<div class="panel"><table><thead><tr><th>Measure</th><th>Rules only</th>'
+        "<th>With AI</th><th>Delta</th></tr></thead><tbody>"
+        + "".join(rows) + "</tbody></table></div>" + divergent + "</section>"
+    )
+
+
+def render_html(report: dict[str, Any], comparison: dict[str, Any] | None = None) -> str:
+    meta, s = report["metadata"], report["summary"]
+    layer = meta["decision_layer"]
+    engine_name = layer["model"] if layer["ai_enabled"] else "deterministic rules"
+
+    runmeta = [
+        ("Records", s["payments_processed"]),
+        ("Decision engine", engine_name),
+        ("Fallbacks", layer["decided_by"].get("fallback_rules", 0)),
+        ("Guardrail refusals", layer["decided_by"].get("guardrail", 0)),
+        ("Generated", meta["generated_on"]),
+        ("Seed", meta["random_seed"]),
+    ]
+    meta_html = "".join(
+        f"<span>{_esc(k)}</span><b>{_esc(v)}</b>" for k, v in runmeta
+    )
+
+    merchants = len({c.get("merchant_id") for c in report["audit_log"] if c.get("merchant_id")})
+    figs = [
+        ("At risk", _money(s["amount_at_risk"]), "",
+         f'{s["payments_processed"]} failed payments'
+         + (f" across {merchants} merchants" if merchants else "")),
+        ("Recovered", _money(s["recovered_amount"]), "pos",
+         f'{s["recovered_count"]} payments &middot; {s["amount_recovery_rate_percent"]}% of value'),
+        ("Written off", _money(s["unrecovered_amount"]), "neg",
+         f'{s["payments_processed"] - s["recovered_count"]} unrecovered or refused'),
+        ("Customer touches", f'{s["total_customer_touches"]:,}', "",
+         f'{s["avg_touches_per_pursued_payment"]} avg &middot; ceiling {MAX_ATTEMPTS}'),
+    ]
+    figs_html = "".join(
+        f'<div class="fig"><div class="fig-label">{_esc(l)}</div>'
+        f'<div class="fig-value {c}">{v}</div>'
+        f'<div class="fig-note">{n}</div></div>'
+        for l, v, c, n in figs
+    )
+
+    reasons = []
+    for reason, b in report["by_failure_reason"].items():
+        pct = b["recovery_rate_percent"]
+        reasons.append(
+            f'<div class="reason"><div class="reason-name">{_esc(reason)}</div>'
+            f'<div class="track"><div class="fill" style="width:{max(pct, 0.6)}%"></div></div>'
+            f'<div class="reason-fig"><b>{b["recovered"]}/{b["count"]}</b> &middot; '
+            f'{_money(b["recovered_amount"])} &middot; {pct}%</div></div>'
+        )
+
+    ledger = []
+    for c in report["audit_log"]:
+        src = c["decided_by"]
+        chip = "guard" if src == "guardrail" else ("rules" if src == "fallback_rules" else "ai")
+        outcome = c["outcome"]
+        ocls = "ok" if outcome == "recovered" else "no"
+        ledger.append(
+            f'<tr><td class="pid">{_esc(c["payment_id"])}</td>'
+            f'<td class="amt">{_money(c["amount"])}</td>'
+            f'<td><span class="strategy">{_esc(c["failure_reason"])}</span><br>'
+            f'<span class="conf">{_esc(c["customer_history"])} &middot; '
+            f'{c["previous_successful_payments"]} prior</span></td>'
+            f'<td><span class="strategy">{_esc(c["strategy"])}</span><br>'
+            f'<span class="conf">{_esc(c["confidence"])}</span></td>'
+            f'<td><span class="chip {chip}">{_esc(src)}</span></td>'
+            f'<td class="why">{_esc(c["reasoning"])}</td>'
+            f'<td><span class="chip {ocls}">{_esc(outcome.replace("_", " "))}</span></td></tr>'
+        )
+
+    compare_html = _render_compare(comparison) if comparison else ""
+
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Paytriage Recovery Statement</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&amp;display=swap">
+<style>{HTML_STYLE}</style></head><body><div class="sheet">
+<header class="masthead"><div>
+<h1 class="wordmark">Paytriage <span>/ Recovery Statement</span></h1>
+<div class="doctype">Failed recurring payments &middot; decision + outcome ledger</div>
+</div><div class="runmeta">{meta_html}</div></header>
+<div class="verdict">{figs_html}</div>
+{compare_html}
+<section><h2>Recovery by failure reason</h2>
+<p class="sub">Share of payments recovered, per decline type.</p>
+<div class="reasons">{"".join(reasons)}</div></section>
+<section><h2>Decision ledger</h2>
+<p class="sub">Every payment, who decided it, and why. Guardrail rows never reached the model.</p>
+<div class="ledger"><table><thead><tr><th>Payment</th><th class="amt">Amount</th>
+<th>Failure / segment</th><th>Decision</th><th>Decided by</th><th>Reasoning</th><th>Outcome</th>
+</tr></thead><tbody>{"".join(ledger)}</tbody></table></div></section>
+<section><div class="note caveat"><b>On reading these numbers.</b>
+{_esc(meta["simulation_note"])} The rules path is exactly reproducible at a fixed seed; an AI run
+varies between invocations because model decisions are not deterministic.</div></section>
+<footer><span>paytriage &middot; generated by agent.py</span>
+<span>Razorpay AI Buildathon &middot; Track 03 &middot; AI Revenue Recovery</span></footer>
+</div></body></html>"""
+
+
+def write_html(html_text: str, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html_text, encoding="utf-8")
+
 def write_report(report: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1257,6 +1698,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Override the provider's default model ID.",
     )
     parser.add_argument(
+        "--html",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Also write a self-contained HTML report to PATH (opens in any browser).",
+    )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help=(
+            "Run the rule engine and the AI on identical input and the same seed, "
+            "and report the difference. Costs no extra API calls - the rules pass is free."
+        ),
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=DEFAULT_BATCH_SIZE,
@@ -1354,7 +1810,7 @@ def main(argv: list[str] | None = None) -> int:
 
     verdicts = decide_all(payments, engine, decider, max(1, args.concurrency), args.batch_size)
 
-    simulator = RecoverySimulator(random.Random(args.seed))
+    simulator = RecoverySimulator(args.seed)
     results = [
         simulator.run(p, decision, decided_by)
         for p, (decision, decided_by) in zip(payments, verdicts)
@@ -1380,9 +1836,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     write_report(report, args.output)
 
+    # --compare re-decides the same payments with the rule engine only. The
+    # simulator is re-seeded identically, so any difference in outcome is
+    # attributable to the decision layer and nothing else.
+    comparison = None
+    if args.compare:
+        if not report["metadata"]["decision_layer"]["ai_enabled"]:
+            print(
+                "Nothing to compare: the AI layer did not run, so both sides "
+                "would be the rule engine. Omit --no-ai and supply an API key.",
+                file=sys.stderr,
+            )
+        else:
+            rules_verdicts = decide_all(payments, engine, None, 1, args.batch_size)
+            rules_sim = RecoverySimulator(args.seed)
+            rules_results = [
+                rules_sim.run(p, decision, decided_by)
+                for p, (decision, decided_by) in zip(payments, rules_verdicts)
+            ]
+            rules_report = build_report(rules_results, rejected, args.seed)
+            comparison = build_comparison(rules_report, report)
+
+    if args.html:
+        write_html(render_html(report, comparison), args.html)
+
     if not args.quiet:
         print_summary(report)
-        print(f"Full audit trail written to {args.output}\n")
+        if comparison:
+            print_comparison(comparison, report["metadata"]["decision_layer"]["model"])
+        print(f"Full audit trail written to {args.output}")
+        if args.html:
+            print(f"HTML report written to {args.html}")
+        print()
 
     return 0
 

@@ -9,3 +9,6 @@ venv/
 
 # macOS
 .DS_Store
+
+# Generated report - regenerate with: python agent.py --html report.html
+report.html

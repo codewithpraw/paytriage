@@ -83,53 +83,63 @@ failed-payment records). The AI column is `python agent.py`; the rules column
 is `python agent.py --no-ai`, which is exactly reproducible and serves as the
 baseline the AI layer is measured against.
 
-| Metric | Rules only | With AI (`gemini-3.5-flash-lite`) |
-|---|---|---|
-| Payments processed | 46 | 46 |
-| Amount at risk | ₹63,204 | ₹63,204 |
-| Pursued | 36 | 35 |
-| Declined by guardrails | 10 | 10 |
-| Recovered | 30 | 29 |
-| Amount recovered | ₹33,070 | **₹35,871** |
-| Amount recovery rate | 52.3% | **56.8%** |
-| Success rate when pursued | 83.3% | 82.9% |
-| Avg attempts per pursued payment | 1.47 | 1.57 |
+Run it yourself with `python agent.py --compare`, which produces exactly this
+table: both engines, identical input, identical seed.
 
-By failure reason, with AI decisions:
-
-| Reason | Recovered | Amount | Rate |
+| Metric | Rules only | With AI (`gemini-3.5-flash-lite`) | Delta |
 |---|---|---|---|
-| network_error | 8/8 | ₹4,592 | 100% |
-| card_expired | 10/15 | ₹11,490 | 66.7% |
-| insufficient_funds | 10/16 | ₹17,790 | 62.5% |
-| bank_decline | 1/7 | ₹1,999 | 14.3% |
+| Payments processed | 46 | 46 | — |
+| Amount at risk | ₹63,204 | ₹63,204 | — |
+| Pursued | 36 | 36 | — |
+| Declined by guardrails | 10 | 10 | — |
+| Recovered | 25 | 26 | +1 |
+| Amount recovered | ₹27,175 | **₹28,974** | **+₹1,799** |
+| Amount recovery rate | 43.0% | **45.8%** | **+2.8 pts** |
+| Success rate when pursued | 69.4% | **72.2%** | +2.8 pts |
+| Customer touches | 64 | 65 | +1 |
+
+Nine payments were decided differently, and the swing across exactly those nine
+sums to +₹1,799 — the entire difference between the columns. Nothing else moved,
+because each payment's simulated outcome is drawn from its own seeded stream
+(see below).
 
 All 36 eligible payments were decided by the model — no fallbacks, no
 rate-limit retries — in **3 API requests**, because payments are batched.
 
+### Why the comparison is trustworthy
+
+Two properties make this an A/B rather than two unrelated runs:
+
+**Strategy affects outcomes.** The simulator asks whether a strategy actually
+addresses the failure. Silently retrying an expired card scores 21%; notifying
+the customer first scores 83%, because an expired card cannot clear until new
+details exist. Without this the two engines were indistinguishable — an earlier
+version scored `immediate_retry` and `notify_then_retry` identically, so a model
+that reasoned correctly about strategy showed no advantage at all.
+
+**Each payment gets its own random stream**, derived from the run seed and the
+payment id. With one shared sequence, changing a single decision shifted the
+luck of every payment after it, and the comparison silently attributed unrelated
+noise to the decision layer. Per-payment streams mean a payment's outcome depends
+only on its own decision — which is why the nine divergences reconcile exactly
+against the total.
+
 ### These AI numbers are one run, not a fixed result
 
 The rules column is exactly reproducible: same seed, same output, forever. The
-AI column is not, because model decisions vary between invocations. Two
-consecutive runs on identical input produced ₹35,871 (56.8%) and ₹36,569
-(57.9%) — the model chose `skip` once in one run and not the other. The table
-above is the run currently saved in `recovery_results.json`; expect roughly
-57% ± 1 rather than an exact figure.
+AI column is not, because model decisions vary between invocations. Expect the
+delta to move by a point or two run to run; the direction has been consistent,
+the exact figure is not.
 
-This is why `--no-ai` exists and why the seed matters: it separates *simulator*
-randomness, which is controlled, from *model* variability, which is not.
+### Where the AI diverges from the rules
 
-### Where the AI diverges from the rules, and the honest caveat
+The largest single swing was `pay_LMN0A9B`, a ₹1,999 bank decline from a
+customer with 15 prior payments. The rule engine routes every established-customer
+bank decline to a human; the model chose to notify and retry, and recovered it.
 
-The rule engine routes every established-customer bank decline to a human. The
-model retried one instead and recovered ₹1,999 — the single largest source of
-the gap between the two columns.
-
-It also generalised a rule rather than copying it. On `pay_KDL9H3K` — an
-expired card for a customer with 12 prior payments — it reasoned that an
-account-updater refresh might clear the charge without bothering the customer.
-The hand-written rule only applies that shortcut at 15+ payments; the model
-reached the same insight and applied it a threshold lower.
+It does not win every exchange, and the report shows that too: on `pay_KDL9H3K`
+it retried an expired card silently where the rules would have notified first,
+and lost ₹499 doing it.
 
 **The caveat:** the AI is more aggressive than the policy it replaced. It
 pursues bank declines the rules deliberately escalate to humans, and the

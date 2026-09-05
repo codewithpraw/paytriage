@@ -112,3 +112,101 @@ both the rules and the model reason about explicitly, so the simulator has to
 model it or that reasoning registers as noise.
 
 ---
+
+## 4. Randomness leaked between payments
+
+Found immediately after fixing #3, because the numbers still did not add up.
+
+**What happened:** the comparison reported a total difference of +₹1,500, while
+the sum of the individual payments that were decided differently came to
+−₹1,400. Both figures were computed correctly. They disagreed because the
+experiment was not controlled.
+
+**The cause:** the simulator drew from a single shared `random.Random(seed)`,
+consumed in order across all payments. Payment 1 takes some values, payment 2
+takes the next ones, and so on.
+
+Now change one decision so payment 1 makes three attempts instead of two. It
+consumes one extra value — and **every payment after it draws from a different
+position in the sequence**. Payments that both engines decided identically got
+different luck, and the comparison attributed that noise to the decision layer.
+
+**The fix:** each payment draws from its own stream, derived from
+`f"{seed}:{payment_id}"`. A payment's outcome now depends only on its own
+decision.
+
+With #3 and #4 both fixed, the numbers reconcile exactly: nine payments decided
+differently, swinging **+₹1,799**, which is the entire gap between the two
+columns. That reconciliation is now asserted in the test suite — if the swings
+ever stop adding up to the total, the A/B has silently broken again.
+
+---
+
+## 5. The chosen model provider cost money that did not exist
+
+**Assumed:** Claude for the decision layer.
+
+**Constraint discovered later:** a hard budget of zero. Anthropic has no free
+tier — API credits must be purchased.
+
+**The trap along the way:** a free "Gemini Pro" subscription looked like the
+answer. It is not. Google's documentation is explicit that consumer AI plan
+benefits *"apply only within the Google AI Studio web interface"* and that
+direct API use is "billed and managed separately." A consumer subscription
+grants no API access at all. The API free tier is a separate door, reached
+through AI Studio, and it covers Flash models only — Pro models left the free
+tier in April 2026.
+
+**The fix:** the decision layer was made provider-agnostic. `GeminiProvider`
+and `ClaudeProvider` handle transport only; all validation, fallback, and audit
+logic lives once in `AIDecider`. Switching providers is a flag, not a rewrite.
+The default is `gemini-3.5-flash-lite`, which stays inside the free tier.
+
+---
+
+## 6. A 400 that was misdiagnosed as a credentials problem
+
+**Symptom:** every run failed at startup with
+`responseFormat must be set when responseMimeType is set` — despite both
+being set.
+
+**First wrong turn:** the preflight check reported this as *"credentials
+rejected,"* sending debugging toward the API key, which was fine. That
+misleading message was itself a bug: a 400 is a malformed request, not an
+authentication failure, and conflating them wasted time. The preflight now
+distinguishes 401/403 (key problem) from 400 (request-shape problem) and says
+which.
+
+**The real cause:** two different exception hierarchies. The SDK's newer
+`interactions` API raises from `google.genai._gaos.lib.compat_errors`, not from
+`google.genai.errors` — so none of the carefully-written `except` clauses ever
+matched, and the error escaped as an unhandled type. Errors are now classified
+by HTTP status, which does not depend on which private module the SDK
+reorganises next.
+
+**And the request itself:** found by intercepting the serialised HTTP body
+rather than guessing at the SDK's field names. Sending a top-level
+`response_mime_type` *alongside* `response_format` is rejected; the mime type
+belongs nested inside `response_format`. Reading what was actually sent on the
+wire took two minutes and ended an hour of speculation.
+
+---
+
+## What this list has in common
+
+Four of these six bugs produced **no error at all**. The run completed, the
+report was generated, and the numbers looked plausible:
+
+- 22 payments quietly decided by fallback rules instead of the AI
+- a comparison confidently reporting a delta of zero
+- per-payment swings that did not sum to the total
+- a "successful" run that was measuring the wrong thing entirely
+
+Only the 400 and the hang announced themselves. The rest were caught by
+building something that checked, then noticing the check disagreed with what
+was expected.
+
+That is why `--compare` exists in the form it does, and why the test suite
+asserts reconciliation rather than just "it runs." The most expensive bugs here
+were not crashes. They were plausible-looking numbers.
+

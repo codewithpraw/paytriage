@@ -7,6 +7,10 @@ Paytriage triages failed recurring payments — deciding which ones are worth
 pursuing, choosing a recovery strategy for each, and running a bounded,
 auditable recovery sequence instead of retrying everything the same way.
 
+**▶ [Watch the pitch](https://www.loom.com/share/a6ef86afbdb74f3b8d206f1ab6c41841)** (4:49)
+&nbsp;·&nbsp; [What broke while building it](what-broke.md)
+&nbsp;·&nbsp; [Architecture](architecture.md)
+
 ---
 
 ## The problem

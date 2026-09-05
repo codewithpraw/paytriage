@@ -12,3 +12,7 @@ venv/
 
 # Generated report - regenerate with: python agent.py --html report.html
 report.html
+
+# Pitch video - hosted, not committed
+*.mp4
+*.mov
